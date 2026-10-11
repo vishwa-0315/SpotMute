@@ -62,6 +62,8 @@ object AdDetector {
         else if (title == "spotify") add(2, "metadata title is \"Spotify\"")
 
         if (artist == "spotify") add(2, "metadata artist is \"Spotify\"")
+        else if (artist in titles || titles.any { it.length >= 4 && artist.contains(it) })
+            add(3, "metadata artist contains ad word (\"${s.artist.trim()}\")")
 
         if (mediaId.startsWith("spotify:ad") || mediaId.contains(":ad:"))
             add(3, "media id looks like an ad URI")

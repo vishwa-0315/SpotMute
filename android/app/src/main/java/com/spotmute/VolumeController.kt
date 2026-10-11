@@ -29,6 +29,9 @@ class VolumeController(private val ctx: Context) {
         val target = (max * Prefs.adVolumePercent(ctx) / 100f).roundToInt().coerceIn(0, max)
         if (current <= target) return "volume already $current/$max, left alone"
         Prefs.saveMuteState(ctx, saved = current, mutedTo = target) // persist BEFORE changing
+        if (target == 0) {
+            try { am.adjustStreamVolume(stream, AudioManager.ADJUST_MUTE, 0) } catch (_: Exception) {}
+        }
         am.setStreamVolume(stream, target, 0)
         return "volume $current -> $target (of $max), original saved"
     }
@@ -40,7 +43,8 @@ class VolumeController(private val ctx: Context) {
         val expected = Prefs.mutedTo(ctx)
         val current = am.getStreamVolume(stream)
         Prefs.clearMuteState(ctx)
-        if (current != expected) {
+        try { am.adjustStreamVolume(stream, AudioManager.ADJUST_UNMUTE, 0) } catch (_: Exception) {}
+        if (current != expected && expected > 0) {
             return RestoreOutcome(
                 RestoreResult.USER_CHANGED,
                 "you changed the volume to $current during the ad, so it was not overwritten"

@@ -180,8 +180,9 @@ class SpotMuteListenerService : NotificationListenerService() {
             snap = snapshot(c)
             verdict = AdDetector.evaluate(snap, AdDetector.parseExtra(Prefs.extraTitles(this)))
         }
-        val playing = snap?.playing == true
-        val adNow = verdict.isAd && playing
+        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        val playing = snap?.playing == true || audioManager.isMusicActive
+        val adNow = verdict.isAd
 
         if (adNow) {
             cancelRestore()
@@ -206,7 +207,6 @@ class SpotMuteListenerService : NotificationListenerService() {
                     !enabled -> "off"
                     c == null -> "idle"
                     adNow -> "ad"
-                    verdict.isAd -> "ad-paused"
                     else -> "music"
                 },
                 playing = playing,

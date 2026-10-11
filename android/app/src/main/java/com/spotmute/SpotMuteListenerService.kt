@@ -3,6 +3,7 @@ package com.spotmute
 import android.app.Notification
 import android.content.ComponentName
 import android.content.SharedPreferences
+import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager

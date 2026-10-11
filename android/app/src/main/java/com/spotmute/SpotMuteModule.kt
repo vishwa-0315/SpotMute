@@ -1,10 +1,17 @@
 package com.spotmute
 
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
+import androidx.core.content.FileProvider
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -12,6 +19,7 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import java.io.File
 
 /** JS-facing API: `NativeModules.SpotMute`. Emits the event "SpotMuteStatus". */
 class SpotMuteModule(private val rc: ReactApplicationContext) : ReactContextBaseJavaModule(rc) {
@@ -109,6 +117,71 @@ class SpotMuteModule(private val rc: ReactApplicationContext) : ReactContextBase
     @ReactMethod
     fun requestRebind() {
         NotificationListenerService.requestRebind(ComponentName(rc, SpotMuteListenerService::class.java))
+    }
+
+    @ReactMethod
+    fun getAppVersion(promise: Promise) {
+        try {
+            val pInfo = rc.packageManager.getPackageInfo(rc.packageName, 0)
+            promise.resolve(pInfo.versionName ?: "1.0.0")
+        } catch (e: Exception) {
+            promise.resolve("1.0.0")
+        }
+    }
+
+    @ReactMethod
+    fun installApk(downloadUrl: String, promise: Promise) {
+        try {
+            val dm = rc.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            val uri = Uri.parse(downloadUrl)
+            val fileName = "spotmute-update.apk"
+            val destFile = File(rc.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
+            if (destFile.exists()) destFile.delete()
+
+            val request = DownloadManager.Request(uri).apply {
+                setTitle("SpotMute Update")
+                setDescription("Downloading latest release...")
+                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                setDestinationInExternalFilesDir(rc, Environment.DIRECTORY_DOWNLOADS, fileName)
+                setMimeType("application/vnd.android.package-archive")
+            }
+            val downloadId = dm.enqueue(request)
+
+            val onComplete = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+                    if (id == downloadId) {
+                        try {
+                            rc.unregisterReceiver(this)
+                            if (destFile.exists()) {
+                                val apkUri = FileProvider.getUriForFile(
+                                    rc,
+                                    "${rc.packageName}.fileprovider",
+                                    destFile
+                                )
+                                val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                                    setDataAndType(apkUri, "application/vnd.android.package-archive")
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                rc.startActivity(installIntent)
+                            }
+                        } catch (e: Exception) {
+                            SpotMuteBus.addLog("Install trigger error: ${e.message}")
+                        }
+                    }
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                rc.registerReceiver(onComplete, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), Context.RECEIVER_EXPORTED)
+            } else {
+                rc.registerReceiver(onComplete, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
+            }
+            promise.resolve("Download started")
+        } catch (e: Exception) {
+            promise.reject("ERR_DOWNLOAD", e.message)
+        }
     }
 
     // Required by NativeEventEmitter on the JS side.

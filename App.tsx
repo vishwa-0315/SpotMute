@@ -169,7 +169,10 @@ export default function App() {
     setLatestRelease(null);
     try {
       const res = await fetch('https://api.github.com/repos/vishwa-0315/SpotMute/releases/latest', {
-        headers: {Accept: 'application/vnd.github.v3+json'},
+        headers: {
+          Accept: 'application/vnd.github.v3+json',
+          'User-Agent': 'SpotMute-App',
+        },
       });
       if (!res.ok) {
         setUpdateStatus('Could not fetch releases from GitHub.');

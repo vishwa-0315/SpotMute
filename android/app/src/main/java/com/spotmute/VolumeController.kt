@@ -23,34 +23,69 @@ class VolumeController(private val ctx: Context) {
 
     /** Lowers the volume for an ad. Safe to call repeatedly. Returns a log line. */
     fun muteForAd(): String {
-        if (isMutedByUs()) return "already muted by SpotMute"
         val current = am.getStreamVolume(stream)
         val max = am.getStreamMaxVolume(stream)
         val target = (max * Prefs.adVolumePercent(ctx) / 100f).roundToInt().coerceIn(0, max)
-        if (current <= target) return "volume already $current/$max, left alone"
-        Prefs.saveMuteState(ctx, saved = current, mutedTo = target) // persist BEFORE changing
+
+        if (isMutedByUs()) {
+            // Already tracking original volume.
+            // If the system volume is currently above target (e.g. Spotify reset volume on track transition),
+            // re-enforce the mute without overwriting the user's original music volume.
+            if (current > target) {
+                applyVolume(target)
+                return "volume re-muted to $target (was $current)"
+            }
+            return ""
+        }
+
+        // First time muting this ad break:
+        if (current <= target) {
+            return "volume already $current/$max, left alone"
+        }
+
+        // Persist original music volume BEFORE muting
+        Prefs.saveMuteState(ctx, saved = current, mutedTo = target)
+        applyVolume(target)
+        return "volume $current -> $target (of $max), original saved"
+    }
+
+    private fun applyVolume(target: Int) {
         if (target == 0) {
             try { am.adjustStreamVolume(stream, AudioManager.ADJUST_MUTE, 0) } catch (_: Exception) {}
         }
         am.setStreamVolume(stream, target, 0)
-        return "volume $current -> $target (of $max), original saved"
     }
 
-    /** Restores the saved volume, unless the user touched the volume while muted. */
+    /** Restores the saved volume. */
     fun restoreAfterAd(): RestoreOutcome {
         val saved = Prefs.savedVolume(ctx)
         if (saved < 0) return RestoreOutcome(RestoreResult.NOT_MUTED, "nothing to restore")
-        val expected = Prefs.mutedTo(ctx)
+
         val current = am.getStreamVolume(stream)
+        val max = am.getStreamMaxVolume(stream)
+        val expected = Prefs.mutedTo(ctx)
         Prefs.clearMuteState(ctx)
-        try { am.adjustStreamVolume(stream, AudioManager.ADJUST_UNMUTE, 0) } catch (_: Exception) {}
-        if (current != expected && expected > 0) {
+
+        // If the user intentionally raised the volume well above their saved volume during the ad:
+        if (current > expected && current > saved && expected >= 0) {
             return RestoreOutcome(
                 RestoreResult.USER_CHANGED,
-                "you changed the volume to $current during the ad, so it was not overwritten"
+                "volume changed to $current during ad, kept"
             )
         }
-        am.setStreamVolume(stream, saved, 0)
-        return RestoreOutcome(RestoreResult.RESTORED, "volume restored to $saved")
+
+        // Restore to saved volume, ensuring it's not silent (fallback to 50% if saved was invalid)
+        val restoreTo = if (saved > 0) saved else (max / 2).coerceAtLeast(1)
+
+        try { am.adjustStreamVolume(stream, AudioManager.ADJUST_UNMUTE, 0) } catch (_: Exception) {}
+        am.setStreamVolume(stream, restoreTo, 0)
+
+        // Extra check: if device is still silent, nudge it
+        if (am.getStreamVolume(stream) == 0 && restoreTo > 0) {
+            try { am.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, 0) } catch (_: Exception) {}
+            am.setStreamVolume(stream, restoreTo, 0)
+        }
+
+        return RestoreOutcome(RestoreResult.RESTORED, "volume restored to $restoreTo")
     }
 }

@@ -1,12 +1,16 @@
 package com.spotmute
 
 import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaController
@@ -17,9 +21,12 @@ import android.os.Handler
 import android.os.Looper
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 
 /**
  * Runs in the background once the user grants "Notification access".
+ * Also runs as a persistent Foreground Service to prevent Android from freezing or killing it when minimized or swiped away.
  *
  * Inputs : Spotify's media session (metadata + playback state), Spotify broadcasts, and Spotify's notification text.
  * Output : lowers the music volume while the evidence says an ad is playing, restores it after.
@@ -34,12 +41,16 @@ class SpotMuteListenerService : NotificationListenerService() {
 
         /** Wait this long before restoring, so a brief metadata flicker does not un-mute mid-ad. */
         private const val RESTORE_DELAY_MS = 300L
+
+        private const val CHANNEL_ID = "spotmute_fg_service"
+        private const val NOTIFICATION_ID = 2026
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private val me by lazy { ComponentName(this, SpotMuteListenerService::class.java) }
     private val sessions by lazy { getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager }
     private val volume by lazy { VolumeController(this) }
+    private val audioPlayer by lazy { AdAudioPlayer(this) }
 
     private var connected = false
     private var controller: MediaController? = null
@@ -95,9 +106,104 @@ class SpotMuteListenerService : NotificationListenerService() {
 
     // Re-evaluate when the user changes a setting in the UI (not on our own mute-state writes).
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == Prefs.K_ENABLED || key == Prefs.K_AD_PERCENT || key == Prefs.K_EXTRA_TITLES) {
+        if (key == Prefs.K_ENABLED || key == Prefs.K_AD_PERCENT || key == Prefs.K_EXTRA_TITLES ||
+            key == Prefs.K_SUBSTITUTE_MUSIC || key == Prefs.K_MUTE_SYSTEM_VOLUME) {
+            if (!Prefs.isSubstituteMusicEnabled(this)) {
+                audioPlayer.cutOff()
+            }
             evaluate("settings changed")
         }
+    }
+
+    // ---- Lifecycle & Foreground Service management -----------------------------------------
+
+    override fun onCreate() {
+        super.onCreate()
+        startForegroundServiceCompat()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForegroundServiceCompat()
+        evaluate("service start command")
+        return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        SpotMuteBus.addLog("SpotMute task swiped away/closed, keeping background listener active")
+        startForegroundServiceCompat()
+        NotificationListenerService.requestRebind(me)
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "SpotMute Background Service",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Keeps SpotMute running in background to detect and mute Spotify ads"
+                setShowBadge(false)
+                setSound(null, null)
+                enableVibration(false)
+            }
+            val nm = getSystemService(NotificationManager::class.java)
+            nm?.createNotificationChannel(channel)
+        }
+    }
+
+    private fun buildNotification(statusText: String): Notification {
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+            ?: Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            launchIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("SpotMute")
+            .setContentText(statusText)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setContentIntent(pendingIntent)
+            .build()
+    }
+
+    private fun startForegroundServiceCompat() {
+        createNotificationChannel()
+        val text = if (adActive) "Ad detected — Volume muted" else "Active — Monitoring Spotify"
+        val notification = buildNotification(text)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            SpotMuteBus.addLog("Foreground service start: ${e.message}")
+        }
+    }
+
+    private fun updateNotification(text: String) {
+        try {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(NOTIFICATION_ID, buildNotification(text))
+        } catch (_: Exception) {}
     }
 
     // ---- NotificationListenerService lifecycle ---------------------------------------------
@@ -105,6 +211,7 @@ class SpotMuteListenerService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         connected = true
+        startForegroundServiceCompat()
         Prefs.register(this, prefsListener)
 
         try {
@@ -145,6 +252,7 @@ class SpotMuteListenerService : NotificationListenerService() {
         restoreNow("listener disconnected")
         shutdownWatchers()
         SpotMuteBus.publish(Status(listenerConnected = false))
+        updateNotification("Listener disconnected — tap to check permissions")
         // Ask the system to reconnect us (API 24+, which React Native already requires).
         NotificationListenerService.requestRebind(me)
     }
@@ -187,6 +295,7 @@ class SpotMuteListenerService : NotificationListenerService() {
 
     private fun shutdownWatchers() {
         cancelRestore()
+        audioPlayer.release()
         handler.removeCallbacks(muteWatchdog)
         adMutedStartTime = 0L
         try {
@@ -254,8 +363,12 @@ class SpotMuteListenerService : NotificationListenerService() {
             if (!adActive) {
                 adMutedStartTime = System.currentTimeMillis()
                 SpotMuteBus.addLog("AD detected (score ${verdict.score}; $reason): ${verdict.signals.joinToString("; ")}")
+                updateNotification("Ad detected — Volume muted")
                 handler.removeCallbacks(muteWatchdog)
                 handler.postDelayed(muteWatchdog, 1000L)
+                if (Prefs.isSubstituteMusicEnabled(this)) {
+                    audioPlayer.startPlaying()
+                }
             }
             val muteMsg = volume.muteForAd()
             if (muteMsg.isNotEmpty()) {
@@ -264,8 +377,10 @@ class SpotMuteListenerService : NotificationListenerService() {
         } else {
             if (adActive) {
                 SpotMuteBus.addLog("Ad no longer detected ($reason)")
+                updateNotification(if (!enabled) "SpotMute is paused" else "Active — Monitoring Spotify")
                 handler.removeCallbacks(muteWatchdog)
                 adMutedStartTime = 0L
+                audioPlayer.cutOff()
             }
             if (volume.isMutedByUs()) {
                 scheduleRestore(if (!enabled) "SpotMute switched off" else "ad ended")
@@ -301,6 +416,8 @@ class SpotMuteListenerService : NotificationListenerService() {
                 album = snap?.album.orEmpty(),
                 score = verdict.score,
                 signals = verdict.signals,
+                adsMutedCount = Prefs.adsMutedCount(this),
+                timeSavedSeconds = Prefs.timeSavedSec(this),
             )
         )
     }
@@ -311,8 +428,13 @@ class SpotMuteListenerService : NotificationListenerService() {
         if (restoreTask != null) return
         val task = Runnable {
             restoreTask = null
+            audioPlayer.cutOff()
             val out = volume.restoreAfterAd()
             SpotMuteBus.addLog("Restore ($why): ${out.message}")
+            if (adMutedStartTime > 0L) {
+                val elapsedSec = ((System.currentTimeMillis() - adMutedStartTime) / 1000L).coerceIn(1L, 120L)
+                Prefs.incrementAdStats(this, elapsedSec)
+            }
             adActive = false
             adMutedStartTime = 0L
             handler.removeCallbacks(muteWatchdog)
@@ -340,6 +462,7 @@ class SpotMuteListenerService : NotificationListenerService() {
 
     private fun restoreNow(why: String) {
         cancelRestore()
+        audioPlayer.cutOff()
         handler.removeCallbacks(muteWatchdog)
         adMutedStartTime = 0L
         adActive = false

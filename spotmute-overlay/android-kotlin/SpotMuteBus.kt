@@ -18,6 +18,8 @@ data class Status(
     val album: String = "",
     val score: Int = 0,
     val signals: List<String> = emptyList(),
+    val adsMutedCount: Int = 0,
+    val timeSavedSeconds: Long = 0L,
 )
 
 /** In-process mailbox between the listener service and the React Native module. */

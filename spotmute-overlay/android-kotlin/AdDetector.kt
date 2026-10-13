@@ -53,26 +53,49 @@ object AdDetector {
         val titles = adTitles + extraTitles
         val title = s.title.trim().lowercase()
         val artist = s.artist.trim().lowercase()
-        val album = s.album.trim()
+        val album = s.album.trim().lowercase()
         val mediaId = s.mediaId.trim().lowercase()
         val nTitle = s.notifTitle.trim().lowercase()
         val nText = s.notifText.trim().lowercase()
 
+        val hasAdTitle = title in titles || titles.any { it.length >= 3 && title.contains(it) }
+        val hasAdArtist = artist in titles || titles.any { it.length >= 3 && artist.contains(it) }
+        val isExplicitAdUri = mediaId.startsWith("spotify:ad") || mediaId.contains(":ad:")
+
+        // Strong music signals: Spotify ads are NEVER longer than 50 seconds, never have albums,
+        // and have spotify:track URIs.
+        val isLongTrack = s.durationMs > 50_000L
+        val isStandardTrackUri = mediaId.startsWith("spotify:track:")
+        val hasAlbum = album.isNotEmpty() && album != "-"
+
+        // If it's clearly a regular music track and does NOT have explicit ad title/artist/URI:
+        if ((isLongTrack || (isStandardTrackUri && hasAlbum)) && !hasAdTitle && !hasAdArtist && !isExplicitAdUri) {
+            return Verdict(false, 0, listOf("music track detected (${s.durationMs / 1000}s, not an ad)"))
+        }
+
         if (title in titles) add(3, "metadata title is an ad word (\"${s.title.trim()}\")")
-        else if (title == "spotify") add(2, "metadata title is \"Spotify\"")
+        else if (title == "spotify" && (album.isEmpty() || album == "-")) add(2, "metadata title is \"Spotify\" without album")
+        else if (titles.any { it.length >= 3 && title.contains(it) })
+            add(3, "metadata title contains ad keyword (\"${s.title.trim()}\")")
 
         if (artist == "spotify") add(2, "metadata artist is \"Spotify\"")
+        else if (artist in titles || titles.any { it.length >= 3 && artist.contains(it) })
+            add(3, "metadata artist contains ad word (\"${s.artist.trim()}\")")
 
-        if (mediaId.startsWith("spotify:ad") || mediaId.contains(":ad:"))
+        if (isExplicitAdUri)
             add(3, "media id looks like an ad URI")
 
-        if (nTitle in titles || nText in titles)
+        // Notification text only counts if title or artist or mediaId has at least some ad correlation
+        // (prevents stale notifications from previous ads from falsely classifying new songs)
+        val notifHasAd = titles.any { it.length >= 3 && (nTitle.contains(it) || nText.contains(it)) }
+        if (notifHasAd && (title == "spotify" || title.isEmpty() || hasAdArtist || isExplicitAdUri || s.durationMs <= 45_000L)) {
             add(2, "notification text is an ad word")
+        }
 
-        if (s.canSkipNext == false)
-            add(1, "skip-next not offered (weak: also true when free-tier skips run out)")
+        if (s.canSkipNext == false && (title == "spotify" || isExplicitAdUri || hasAdArtist))
+            add(1, "skip-next not offered")
 
-        if (album.isEmpty() && s.durationMs in 5_000L..45_000L)
+        if ((album.isEmpty() || album == "-") && s.durationMs in 5_000L..45_000L)
             add(1, "no album and short duration (weak)")
 
         return Verdict(score >= THRESHOLD, score, why)

@@ -28,9 +28,24 @@ type Status = {
   album: string;
   score: number;
   signals: string[];
+  adsMutedCount: number;
+  timeSavedSeconds: number;
 };
 
-type Config = {enabled: boolean; adVolumePercent: number; extraTitles: string};
+type SubstituteTrack = {
+  id: string;
+  name: string;
+  path: string;
+  sizeBytes: number;
+};
+
+type Config = {
+  enabled: boolean;
+  adVolumePercent: number;
+  extraTitles: string;
+  substituteMusicEnabled: boolean;
+  muteSystemVolume: boolean;
+};
 
 type SpotMuteNative = {
   getStatus(): Promise<Status>;
@@ -38,6 +53,15 @@ type SpotMuteNative = {
   getLog(): Promise<string[]>;
   getAppVersion(): Promise<string>;
   installApk(downloadUrl: string): Promise<string>;
+  isBatteryOptimizationIgnored(): Promise<boolean>;
+  requestIgnoreBatteryOptimization(): void;
+  resetStats(): Promise<string>;
+  pickAudioFiles(): Promise<SubstituteTrack[]>;
+  getSubstituteTracks(): Promise<SubstituteTrack[]>;
+  removeSubstituteTrack(id: string): Promise<SubstituteTrack[]>;
+  clearSubstituteTracks(): Promise<SubstituteTrack[]>;
+  setSubstituteMusicEnabled(enabled: boolean): void;
+  setMuteSystemVolume(enabled: boolean): void;
   setEnabled(v: boolean): void;
   setAdVolumePercent(v: number): void;
   setExtraTitles(v: string): void;
@@ -61,6 +85,8 @@ const EMPTY: Status = {
   album: '',
   score: 0,
   signals: [],
+  adsMutedCount: 0,
+  timeSavedSeconds: 0,
 };
 
 const STATE_LABEL: Record<State, string> = {
@@ -81,13 +107,39 @@ const STATE_COLOR: Record<State, string> = {
 
 const PRESETS = ['Spotify Premium', 'Sponsored', 'விளம்பரம்', 'विज्ञापन', 'Ad Break'];
 
+function formatTimeSaved(seconds: number): string {
+  if (!seconds || seconds <= 0) return '0s';
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  if (mins < 60) return `${mins}m ${secs}s`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hours}h ${remMins}m`;
+}
+
+function formatFileSize(bytes: number): string {
+  if (!bytes || bytes <= 0) return '';
+  const mb = bytes / (1024 * 1024);
+  return `${mb.toFixed(1)} MB`;
+}
+
 export default function App() {
   const [status, setStatus] = useState<Status>(EMPTY);
-  const [config, setConfig] = useState<Config>({enabled: true, adVolumePercent: 0, extraTitles: ''});
+  const [config, setConfig] = useState<Config>({
+    enabled: true,
+    adVolumePercent: 0,
+    extraTitles: '',
+    substituteMusicEnabled: false,
+    muteSystemVolume: true,
+  });
+  const [substituteTracks, setSubstituteTracks] = useState<SubstituteTrack[]>([]);
+  const [uploadingSongs, setUploadingSongs] = useState(false);
   const [extra, setExtra] = useState('');
   const [newKeyword, setNewKeyword] = useState('');
   const [log, setLog] = useState<string[]>([]);
   const [note, setNote] = useState('');
+  const [batteryIgnored, setBatteryIgnored] = useState<boolean>(true);
 
   // Update checking state
   const [appVersion, setAppVersion] = useState('1.0.0');
@@ -101,6 +153,9 @@ export default function App() {
     }
     setStatus(await native.getStatus());
     setLog(await native.getLog());
+    try {
+      setBatteryIgnored(await native.isBatteryOptimizationIgnored());
+    } catch (_) {}
   }, []);
 
   useEffect(() => {
@@ -111,6 +166,7 @@ export default function App() {
       setConfig(c);
       setExtra(c.extraTitles);
     });
+    native.getSubstituteTracks().then(setSubstituteTracks).catch(() => {});
     native.getAppVersion().then(v => setAppVersion(v)).catch(() => {});
     refresh();
 
@@ -129,6 +185,29 @@ export default function App() {
       appSub.remove();
     };
   }, [refresh]);
+
+  const handleAddSongs = async () => {
+    if (!native) return;
+    setUploadingSongs(true);
+    try {
+      const updated = await native.pickAudioFiles();
+      setSubstituteTracks(updated);
+      setNote(`Added songs. Total in playlist: ${updated.length}`);
+    } catch (e: any) {
+      setNote(`Could not select audio: ${e.message}`);
+    } finally {
+      setUploadingSongs(false);
+    }
+  };
+
+  const handleRemoveTrack = async (id: string) => {
+    if (!native) return;
+    try {
+      const updated = await native.removeSubstituteTrack(id);
+      setSubstituteTracks(updated);
+      setNote('Song removed from playlist.');
+    } catch (_) {}
+  };
 
   const extraList = extra
     ? extra
@@ -255,6 +334,16 @@ export default function App() {
         </View>
       )}
 
+      {!needsAccess && !batteryIgnored && (
+        <View style={[styles.card, styles.warn]}>
+          <Text style={styles.cardTitle}>Background Running (Prevent Android Freeze)</Text>
+          <Text style={styles.text}>
+            To keep SpotMute muting ads when minimized or closed, set battery usage to "Unrestricted" so Android's battery saver doesn't freeze the app.
+          </Text>
+          <Btn label="Disable Battery Optimization" primary onPress={() => native.requestIgnoreBatteryOptimization()} />
+        </View>
+      )}
+
       <View style={styles.card}>
         <View style={styles.rowBetween}>
           <Text style={styles.cardTitle}>Mute Spotify ads</Text>
@@ -274,6 +363,111 @@ export default function App() {
           Spotify session: {status.spotifyFound ? 'found' : 'not found'} · Playing: {status.playing ? 'yes' : 'no'} · Volume lowered by
           SpotMute: {status.mutedByUs ? 'yes' : 'no'}
         </Text>
+      </View>
+
+      {/* Ad Statistics & Tracker Card */}
+      <View style={styles.card}>
+        <View style={styles.rowBetween}>
+          <Text style={styles.cardTitle}>Ad Statistics</Text>
+          <TouchableOpacity
+            style={styles.resetBtn}
+            onPress={async () => {
+              await native?.resetStats();
+              refresh();
+            }}>
+            <Text style={styles.resetBtnText}>Reset</Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={styles.small}>Lifetime tracker of Spotify ads detected and muted by SpotMute:</Text>
+        <View style={styles.statsRow}>
+          <View style={styles.statBox}>
+            <Text style={styles.statNumber}>{status.adsMutedCount ?? 0}</Text>
+            <Text style={styles.statLabel}>Ads Muted</Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statNumber}>{formatTimeSaved(status.timeSavedSeconds ?? 0)}</Text>
+            <Text style={styles.statLabel}>Time Silenced</Text>
+          </View>
+        </View>
+      </View>
+
+      {/* Custom Song Replacement Card */}
+      <View style={styles.card}>
+        <View style={styles.rowBetween}>
+          <View style={{flex: 1, paddingRight: 8}}>
+            <Text style={styles.cardTitle}>Play Uploaded Songs During Ads</Text>
+            <Text style={styles.small}>
+              Plays your downloaded songs during Spotify ads, and cuts off immediately when the ad ends.
+            </Text>
+          </View>
+          <Switch
+            value={config.substituteMusicEnabled}
+            onValueChange={v => {
+              setConfig({...config, substituteMusicEnabled: v});
+              native?.setSubstituteMusicEnabled(v);
+            }}
+          />
+        </View>
+
+        {config.substituteMusicEnabled && (
+          <View style={{marginTop: 14}}>
+            <View style={styles.rowBetween}>
+              <View style={{flex: 1, paddingRight: 8}}>
+                <Text style={styles.boldLabel}>Mute Master Volume</Text>
+                <Text style={styles.small}>
+                  Turn OFF if your phone has separate app sound / per-app volume for Spotify, so SpotMute's songs play at normal volume.
+                </Text>
+              </View>
+              <Switch
+                value={config.muteSystemVolume}
+                onValueChange={v => {
+                  setConfig({...config, muteSystemVolume: v});
+                  native?.setMuteSystemVolume(v);
+                }}
+              />
+            </View>
+
+            <View style={{marginTop: 16}}>
+              <View style={styles.rowBetween}>
+                <Text style={styles.sectionHeading}>
+                  Playlist ({substituteTracks.length} {substituteTracks.length === 1 ? 'song' : 'songs'})
+                </Text>
+                <Btn
+                  label={uploadingSongs ? 'Selecting...' : '+ Add Songs'}
+                  primary
+                  onPress={handleAddSongs}
+                />
+              </View>
+
+              {substituteTracks.length === 0 ? (
+                <Text style={[styles.italicSmall, {marginTop: 10}]}>
+                  No songs added yet. Tap "+ Add Songs" to select multiple downloaded audio files from your phone storage.
+                </Text>
+              ) : (
+                <View style={{marginTop: 10, gap: 8}}>
+                  {substituteTracks.map(t => (
+                    <View key={t.id} style={styles.trackItem}>
+                      <Text style={styles.trackIcon}>🎵</Text>
+                      <View style={{flex: 1, marginRight: 8}}>
+                        <Text style={styles.trackName} numberOfLines={1}>
+                          {t.name}
+                        </Text>
+                        {!!t.sizeBytes && (
+                          <Text style={styles.trackSize}>{formatFileSize(t.sizeBytes)}</Text>
+                        )}
+                      </View>
+                      <TouchableOpacity
+                        style={styles.trackDeleteBtn}
+                        onPress={() => handleRemoveTrack(t.id)}>
+                        <Text style={styles.trackDeleteText}>✕</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+          </View>
+        )}
       </View>
 
       <View style={styles.card}>
@@ -453,5 +647,48 @@ const styles = StyleSheet.create({
   presetChipActive: {borderColor: '#1db954', backgroundColor: '#064e3b'},
   presetText: {color: '#d1d5db', fontSize: 12},
   versionBadge: {backgroundColor: '#1f2937', color: '#10b981', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, fontSize: 12, fontWeight: '600', overflow: 'hidden'},
+  statsRow: {flexDirection: 'row', gap: 12, marginTop: 12},
+  statBox: {
+    flex: 1,
+    backgroundColor: '#0c131d',
+    paddingVertical: 14,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  statNumber: {color: '#10b981', fontSize: 24, fontWeight: '700', marginBottom: 4},
+  statLabel: {color: '#94a3b8', fontSize: 12, fontWeight: '500'},
+  resetBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: '#1f2937',
+    borderWidth: 1,
+    borderColor: '#374151',
+  },
+  resetBtnText: {color: '#9ca3af', fontSize: 11, fontWeight: '600'},
+  boldLabel: {color: '#fff', fontSize: 14, fontWeight: '600'},
+  sectionHeading: {color: '#d1d5db', fontSize: 14, fontWeight: '600'},
+  trackItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0c131d',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  trackIcon: {fontSize: 18, marginRight: 10},
+  trackName: {color: '#f3f4f6', fontSize: 13, fontWeight: '500'},
+  trackSize: {color: '#9ca3af', fontSize: 11, marginTop: 2},
+  trackDeleteBtn: {
+    padding: 6,
+    borderRadius: 6,
+    backgroundColor: '#1f2937',
+  },
+  trackDeleteText: {color: '#ef4444', fontSize: 13, fontWeight: '700'},
   footer: {color: '#6b7280', fontSize: 12, lineHeight: 17, marginTop: 8},
 });

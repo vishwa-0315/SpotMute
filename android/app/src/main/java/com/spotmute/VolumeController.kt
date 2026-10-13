@@ -23,6 +23,9 @@ class VolumeController(private val ctx: Context) {
 
     /** Lowers the volume for an ad. Safe to call repeatedly. Returns a log line. */
     fun muteForAd(): String {
+        if (!Prefs.isMuteSystemVolume(ctx)) {
+            return "per-app volume mode: master volume untouched"
+        }
         val current = am.getStreamVolume(stream)
         val max = am.getStreamMaxVolume(stream)
         val target = (max * Prefs.adVolumePercent(ctx) / 100f).roundToInt().coerceIn(0, max)

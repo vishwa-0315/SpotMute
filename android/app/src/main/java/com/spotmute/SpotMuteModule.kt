@@ -149,9 +149,9 @@ class SpotMuteModule(private val rc: ReactApplicationContext) :
         return uri.lastPathSegment
     }
 
-    override fun onNewIntent(intent: Intent?) {}
+    override fun onNewIntent(intent: Intent) {}
 
-    override fun onActivityResult(activity: Activity?, requestCode: Int, resultCode: Int, data: Intent?) {
+    override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode != REQUEST_PICK_AUDIO) return
         val promise = pickFilesPromise ?: return
         pickFilesPromise = null
@@ -201,7 +201,7 @@ class SpotMuteModule(private val rc: ReactApplicationContext) :
 
     @ReactMethod
     fun pickAudioFiles(promise: Promise) {
-        val activity = currentActivity
+        val activity = rc.currentActivity
         if (activity == null) {
             promise.reject("ERR_NO_ACTIVITY", "Current activity is null")
             return

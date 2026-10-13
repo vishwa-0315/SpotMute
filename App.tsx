@@ -412,32 +412,15 @@ export default function App() {
         {config.substituteMusicEnabled && (
           <View style={{marginTop: 14}}>
             <View style={styles.rowBetween}>
-              <View style={{flex: 1, paddingRight: 8}}>
-                <Text style={styles.boldLabel}>Mute Master Volume</Text>
-                <Text style={styles.small}>
-                  Turn OFF if your phone has separate app sound / per-app volume for Spotify, so SpotMute's songs play at normal volume.
-                </Text>
-              </View>
-              <Switch
-                value={config.muteSystemVolume}
-                onValueChange={v => {
-                  setConfig({...config, muteSystemVolume: v});
-                  native?.setMuteSystemVolume(v);
-                }}
+              <Text style={styles.sectionHeading}>
+                Playlist ({substituteTracks.length} {substituteTracks.length === 1 ? 'song' : 'songs'})
+              </Text>
+              <Btn
+                label={uploadingSongs ? 'Selecting...' : '+ Add Songs'}
+                primary
+                onPress={handleAddSongs}
               />
             </View>
-
-            <View style={{marginTop: 16}}>
-              <View style={styles.rowBetween}>
-                <Text style={styles.sectionHeading}>
-                  Playlist ({substituteTracks.length} {substituteTracks.length === 1 ? 'song' : 'songs'})
-                </Text>
-                <Btn
-                  label={uploadingSongs ? 'Selecting...' : '+ Add Songs'}
-                  primary
-                  onPress={handleAddSongs}
-                />
-              </View>
 
               {substituteTracks.length === 0 ? (
                 <Text style={[styles.italicSmall, {marginTop: 10}]}>
@@ -466,9 +449,8 @@ export default function App() {
                 </View>
               )}
             </View>
-          </View>
-        )}
-      </View>
+          )}
+        </View>
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>What Spotify is reporting</Text>

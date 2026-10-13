@@ -379,8 +379,13 @@ class SpotMuteListenerService : NotificationListenerService() {
                 SpotMuteBus.addLog("Ad no longer detected ($reason)")
                 updateNotification(if (!enabled) "SpotMute is paused" else "Active — Monitoring Spotify")
                 handler.removeCallbacks(muteWatchdog)
-                adMutedStartTime = 0L
                 audioPlayer.cutOff()
+                if (adMutedStartTime > 0L) {
+                    val elapsedSec = ((System.currentTimeMillis() - adMutedStartTime) / 1000L).coerceIn(1L, 120L)
+                    Prefs.incrementAdStats(this, elapsedSec)
+                    SpotMuteBus.addLog("Ad silenced for ${elapsedSec}s (total ads: ${Prefs.adsMutedCount(this)})")
+                    adMutedStartTime = 0L
+                }
             }
             if (volume.isMutedByUs()) {
                 scheduleRestore(if (!enabled) "SpotMute switched off" else "ad ended")

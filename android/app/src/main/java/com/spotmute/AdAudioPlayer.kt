@@ -25,6 +25,7 @@ class AdAudioPlayer(private val ctx: Context) {
         mediaPlayer?.let { mp ->
             try {
                 if (!mp.isPlaying) {
+                    applyVolume(mp)
                     mp.start()
                     SpotMuteBus.addLog("Resumed substitute track: ${tracks[currentTrackIndex % tracks.size].name}")
                     return
@@ -54,7 +55,7 @@ class AdAudioPlayer(private val ctx: Context) {
                 setAudioAttributes(
                     AudioAttributes.Builder()
                         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setUsage(AudioAttributes.USAGE_ALARM)
                         .build()
                 )
                 setDataSource(file.absolutePath)
@@ -67,6 +68,7 @@ class AdAudioPlayer(private val ctx: Context) {
                 }
                 setOnPreparedListener { mp ->
                     try {
+                        applyVolume(mp)
                         mp.start()
                         SpotMuteBus.addLog("Playing substitute track: ${track.name}")
                     } catch (e: Exception) {
@@ -100,6 +102,23 @@ class AdAudioPlayer(private val ctx: Context) {
                 release()
             }
         }
+    }
+
+    private fun applyVolume(mp: MediaPlayer) {
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return
+        val savedVol = Prefs.savedVolume(ctx)
+        val maxMusic = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+        val currentMusic = if (savedVol > 0) savedVol else am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+        val ratio = if (maxMusic > 0) (currentMusic.toFloat() / maxMusic.toFloat()).coerceIn(0.2f, 1.0f) else 0.8f
+
+        val maxAlarm = am.getStreamMaxVolume(android.media.AudioManager.STREAM_ALARM)
+        val currentAlarm = am.getStreamVolume(android.media.AudioManager.STREAM_ALARM)
+        if (currentAlarm == 0 && maxAlarm > 0) {
+            try {
+                am.setStreamVolume(android.media.AudioManager.STREAM_ALARM, (maxAlarm * 0.7f).toInt().coerceAtLeast(1), 0)
+            } catch (_: Exception) {}
+        }
+        mp.setVolume(ratio, ratio)
     }
 
     fun release() {
